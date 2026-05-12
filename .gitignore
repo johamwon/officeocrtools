@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 运行时数据
+storage/
+*.db
+
+# 环境
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# 上传文件
+uploads/
+
+# 系统文件
+Thumbs.db
+.DS_Store
+
+# 测试产物
+*.png
+!frontend/*.png

@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文档解析与合同管理系统</title>
+    <link rel="stylesheet" href="https://unpkg.com/element-plus@2.8.0/dist/index.css">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="app">
+        <el-container class="app-container">
+            <!-- 顶部导航 -->
+            <el-header class="app-header">
+                <div class="logo">
+                    <el-icon><Document /></el-icon>
+                    <span>文档解析与合同管理系统</span>
+                </div>
+                <el-menu
+                    :default-active="activeMenu"
+                    mode="horizontal"
+                    @select="handleMenuSelect"
+                    background-color="transparent"
+                    text-color="#fff"
+                    active-text-color="#409EFF"
+                >
+                    <el-menu-item index="upload">文档上传</el-menu-item>
+                    <el-menu-item index="tasks">解析任务</el-menu-item>
+                    <el-menu-item index="contracts">合同库</el-menu-item>
+                </el-menu>
+            </el-header>
+
+            <!-- 主内容区 -->
+            <el-main class="app-main">
+                <!-- 上传页 -->
+                <div v-if="activeMenu === 'upload'" class="page-upload">
+                    <el-card class="upload-card">
+                        <template #header>
+                            <div class="card-header">
+                                <span>上传文档</span>
+                            </div>
+                        </template>
+
+                        <el-form :model="uploadForm" label-width="100px">
+                            <el-form-item label="文档类型" required>
+                                <el-select v-model="uploadForm.docType" placeholder="请选择文档类型" style="width: 300px">
+                                    <el-option label="合同" value="contract"></el-option>
+                                    <el-option label="发票" value="invoice"></el-option>
+                                    <el-option label="身份证" value="id_card"></el-option>
+                                    <el-option label="营业执照" value="business_license"></el-option>
+                                    <el-option label="收据" value="receipt"></el-option>
+                                </el-select>
+                            </el-form-item>
+
+                            <el-form-item label="文档文件">
+                                <el-upload
+                                    class="upload-drop"
+                                    drag
+                                    :auto-upload="false"
+                                    :on-change="handleFileChange"
+                                    :file-list="fileList"
+                                    :limit="1"
+                                    accept=".pdf,.png,.jpg,.jpeg,.bmp,.tiff,.tif"
+                                >
+                                    <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+                                    <div class="el-upload__text">
+                                        拖拽文件到此处，或<em>点击上传</em>
+                                    </div>
+                                    <template #tip>
+                                        <div class="el-upload__tip">
+                                            支持 PDF/PNG/JPG/BMP/TIFF 格式，单文件不超过 50MB
+                                        </div>
+                                    </template>
+                                </el-upload>
+                            </el-form-item>
+
+                            <el-form-item>
+                                <el-button
+                                    type="primary"
+                                    size="large"
+                                    @click="submitUpload"
+                                    :loading="uploading"
+                                    :disabled="!uploadForm.docType || !uploadForm.file"
+                                >
+                                    开始解析
+                                </el-button>
+                            </el-form-item>
+                        </el-form>
+                    </el-card>
+                </div>
+
+                <!-- 任务列表页 -->
+                <div v-if="activeMenu === 'tasks'" class="page-tasks">
+                    <el-card>
+                        <template #header>
+                            <div class="card-header">
+                                <span>解析任务</span>
+                                <div>
+                                    <el-select v-model="taskFilter.status" placeholder="全部状态" clearable @change="loadTasks" style="width: 150px; margin-right: 10px">
+                                        <el-option label="待处理" value="pending"></el-option>
+                                        <el-option label="处理中" value="processing"></el-option>
+                                        <el-option label="已完成" value="completed"></el-option>
+                                        <el-option label="失败" value="failed"></el-option>
+                                        <el-option label="已复审" value="reviewed"></el-option>
+                                    </el-select>
+                                    <el-button type="primary" @click="loadTasks" :icon="Refresh">刷新</el-button>
+                                </div>
+                            </div>
+                        </template>
+
+                        <el-table :data="tasks" stripe style="width: 100%" v-loading="loadingTasks">
+                            <el-table-column prop="id" label="ID" width="70"></el-table-column>
+                            <el-table-column prop="file_name" label="文件名" min-width="250" show-overflow-tooltip></el-table-column>
+                            <el-table-column prop="doc_type" label="类型" width="120">
+                                <template #default="scope">
+                                    <el-tag>{{ docTypeLabel(scope.row.doc_type) }}</el-tag>
+                                </template>
+                            </el-table-column>
+                            <el-table-column prop="status" label="状态" width="120">
+                                <template #default="scope">
+                                    <el-tag :type="statusType(scope.row.status)">{{ statusLabel(scope.row.status) }}</el-tag>
+                                </template>
+                            </el-table-column>
+                            <el-table-column label="进度" width="180">
+                                <template #default="scope">
+                                    <el-progress
+                                        :percentage="scope.row.progress || 0"
+                                        :status="scope.row.status === 'failed' ? 'exception' : (scope.row.status === 'completed' || scope.row.status === 'reviewed' ? 'success' : '')"
+                                    ></el-progress>
+                                </template>
+                            </el-table-column>
+                            <el-table-column prop="created_at" label="创建时间" width="180">
+                                <template #default="scope">{{ formatDate(scope.row.created_at) }}</template>
+                            </el-table-column>
+                            <el-table-column label="操作" width="220" fixed="right">
+                                <template #default="scope">
+                                    <el-button
+                                        size="small"
+                                        type="primary"
+                                        @click="openReview(scope.row)"
+                                        :disabled="!(scope.row.status === 'completed' || scope.row.status === 'reviewed')"
+                                    >
+                                        复审
+                                    </el-button>
+                                    <el-button
+                                        size="small"
+                                        type="danger"
+                                        @click="deleteTask(scope.row)"
+                                    >
+                                        删除
+                                    </el-button>
+                                </template>
+                            </el-table-column>
+                        </el-table>
+                    </el-card>
+                </div>
+
+                <!-- 合同列表页 -->
+                <div v-if="activeMenu === 'contracts'" class="page-contracts">
+                    <el-card>
+                        <template #header>
+                            <div class="card-header">
+                                <span>合同库</span>
+                                <div>
+                                    <el-input
+                                        v-model="contractSearch"
+                                        placeholder="搜索合同名/编号/甲乙方"
+                                        style="width: 280px; margin-right: 10px"
+                                        clearable
+                                        @keyup.enter="loadContracts"
+                                    ></el-input>
+                                    <el-button type="primary" @click="loadContracts">搜索</el-button>
+                                </div>
+                            </div>
+                        </template>
+
+                        <el-table :data="contracts" stripe style="width: 100%" v-loading="loadingContracts">
+                            <el-table-column prop="id" label="ID" width="70"></el-table-column>
+                            <el-table-column prop="contract_name" label="合同名称" min-width="250" show-overflow-tooltip></el-table-column>
+                            <el-table-column prop="contract_number" label="合同编号" width="180" show-overflow-tooltip></el-table-column>
+                            <el-table-column prop="party_a" label="甲方" min-width="180" show-overflow-tooltip></el-table-column>
+                            <el-table-column prop="party_b" label="乙方" min-width="180" show-overflow-tooltip></el-table-column>
+                            <el-table-column prop="total_amount" label="合同金额" width="140">
+                                <template #default="scope">
+                                    <span v-if="scope.row.total_amount">¥ {{ Number(scope.row.total_amount).toLocaleString() }}</span>
+                                </template>
+                            </el-table-column>
+                            <el-table-column prop="sign_date" label="签订日期" width="120"></el-table-column>
+                            <el-table-column label="操作" width="160" fixed="right">
+                                <template #default="scope">
+                                    <el-button size="small" @click="viewContract(scope.row)">查看</el-button>
+                                    <el-button size="small" type="danger" @click="deleteContract(scope.row)">删除</el-button>
+                                </template>
+                            </el-table-column>
+                        </el-table>
+                    </el-card>
+                </div>
+
+                <!-- 复审弹窗 -->
+                <el-dialog
+                    v-model="reviewDialog.visible"
+                    title="合同复审"
+                    width="90%"
+                    top="5vh"
+                    :close-on-click-modal="false"
+                    destroy-on-close
+                >
+                    <div v-if="reviewDialog.task" class="review-container">
+                        <div class="review-left">
+                            <div class="review-section-title">原文档预览</div>
+                            <div class="review-preview">
+                                <iframe
+                                    v-if="isPdfFile(reviewDialog.task.file_name)"
+                                    :src="`/api/tasks/${reviewDialog.task.id}/file`"
+                                    class="preview-iframe"
+                                ></iframe>
+                                <img
+                                    v-else
+                                    :src="`/api/tasks/${reviewDialog.task.id}/file`"
+                                    class="preview-image"
+                                />
+                            </div>
+                            <el-collapse class="ocr-collapse">
+                                <el-collapse-item title="查看OCR识别文本" name="ocr">
+                                    <div class="ocr-text">{{ reviewDialog.task.ocr_text }}</div>
+                                </el-collapse-item>
+                            </el-collapse>
+                        </div>
+
+                        <div class="review-right">
+                            <div class="review-section-title">识别字段（可编辑）</div>
+                            <el-form :model="reviewDialog.fields" label-width="150px" label-position="left">
+                                <template v-for="(fieldConfig, fieldKey) in getFieldsForDocType(reviewDialog.task.doc_type)" :key="fieldKey">
+                                    <el-form-item :label="fieldConfig.label">
+                                        <div class="field-row">
+                                            <el-input
+                                                v-if="!fieldConfig.multiline"
+                                                v-model="reviewDialog.fields[fieldKey]"
+                                                clearable
+                                            ></el-input>
+                                            <el-input
+                                                v-else
+                                                v-model="reviewDialog.fields[fieldKey]"
+                                                type="textarea"
+                                                :rows="3"
+                                            ></el-input>
+                                            <el-tag
+                                                v-if="getFieldDetail(fieldKey)"
+                                                :type="confidenceTagType(getFieldDetail(fieldKey).confidence)"
+                                                size="small"
+                                                class="confidence-tag"
+                                            >
+                                                {{ getFieldDetail(fieldKey).source }} / {{ (getFieldDetail(fieldKey).confidence * 100).toFixed(0) }}%
+                                            </el-tag>
+                                        </div>
+                                    </el-form-item>
+                                </template>
+
+                                <el-form-item label="复审人">
+                                    <el-input v-model="reviewDialog.reviewer" placeholder="请输入您的姓名"></el-input>
+                                </el-form-item>
+                                <el-form-item label="备注">
+                                    <el-input
+                                        v-model="reviewDialog.notes"
+                                        type="textarea"
+                                        :rows="2"
+                                        placeholder="复审备注（可选）"
+                                    ></el-input>
+                                </el-form-item>
+                            </el-form>
+                        </div>
+                    </div>
+
+                    <template #footer>
+                        <el-button @click="reviewDialog.visible = false">取消</el-button>
+                        <el-button type="primary" @click="submitReview" :loading="submittingReview">
+                            确认入库
+                        </el-button>
+                    </template>
+                </el-dialog>
+
+                <!-- 合同详情弹窗 -->
+                <el-dialog
+                    v-model="contractDialog.visible"
+                    title="合同详情"
+                    width="70%"
+                    top="8vh"
+                >
+                    <div v-if="contractDialog.contract">
+                        <el-descriptions :column="2" border>
+                            <el-descriptions-item label="合同名称" :span="2">{{ contractDialog.contract.contract_name }}</el-descriptions-item>
+                            <el-descriptions-item label="合同编号">{{ contractDialog.contract.contract_number }}</el-descriptions-item>
+                            <el-descriptions-item label="签订日期">{{ contractDialog.contract.sign_date }}</el-descriptions-item>
+                            <el-descriptions-item label="甲方">{{ contractDialog.contract.party_a }}</el-descriptions-item>
+                            <el-descriptions-item label="乙方">{{ contractDialog.contract.party_b }}</el-descriptions-item>
+                            <el-descriptions-item label="合同金额">
+                                <span v-if="contractDialog.contract.total_amount">¥ {{ Number(contractDialog.contract.total_amount).toLocaleString() }}</span>
+                            </el-descriptions-item>
+                            <el-descriptions-item label="交付截止">{{ contractDialog.contract.delivery_deadline }}</el-descriptions-item>
+                            <el-descriptions-item label="服务内容" :span="2">{{ contractDialog.contract.service_content }}</el-descriptions-item>
+                            <el-descriptions-item label="履行期限" :span="2">{{ contractDialog.contract.performance_period }}</el-descriptions-item>
+                            <el-descriptions-item label="付款条件" :span="2">{{ contractDialog.contract.payment_terms }}</el-descriptions-item>
+                            <el-descriptions-item label="复审人">{{ contractDialog.contract.reviewer }}</el-descriptions-item>
+                            <el-descriptions-item label="复审时间">{{ formatDate(contractDialog.contract.reviewed_at) }}</el-descriptions-item>
+                            <el-descriptions-item label="备注" :span="2">{{ contractDialog.contract.review_notes }}</el-descriptions-item>
+                        </el-descriptions>
+                    </div>
+                </el-dialog>
+
+            </el-main>
+        </el-container>
+    </div>
+
+    <script src="https://unpkg.com/vue@3.4.0/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/element-plus@2.8.0/dist/index.full.min.js"></script>
+    <script src="https://unpkg.com/@element-plus/icons-vue@2.3.1/dist/index.iife.min.js"></script>
+    <script src="https://unpkg.com/axios@1.6.0/dist/axios.min.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>
