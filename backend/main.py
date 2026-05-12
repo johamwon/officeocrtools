@@ -25,6 +25,12 @@ from notifier.scheduler import NotificationScheduler
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(
+            BASE_DIR / "logs" / "backend.log", encoding="utf-8", delay=True
+        ),
+    ],
 )
 logger = logging.getLogger(__name__)
 
