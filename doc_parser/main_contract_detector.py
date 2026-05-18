@@ -118,11 +118,16 @@ class MainContractDetector:
         识别主合同起始页
 
         通常就是第0页（文档开头）。
-        只有完全空白的页才跳过（阈值设为5字符以下）。
+        跳过完全空白或只有极少数字符的页。
         """
         for i, page in enumerate(pages):
-            # 只跳过几乎空白的页（<5字符）
-            if len(page.strip()) < 5:
+            stripped = page.strip()
+            # 跳过完全空白或只有标点/空格的页
+            if not stripped:
+                continue
+            # 跳过极短的页（可能是OCR噪声或装饰性文字）
+            # 中文合同封面通常至少有2-3个中文字符，加上可能的空格和标点
+            if len(stripped) < 3:
                 continue
             return i
         return 0
@@ -163,10 +168,9 @@ class MainContractDetector:
                             "include_current": False,
                         }
 
-            # 检查独立协议标题（可能出现在页首）
-            page_head = page[:200]
+            # 检查独立协议标题（可能出现在页首，但为了稳健检查整个页面）
             for sub_pattern in self._sub_titles:
-                if sub_pattern.search(page_head):
+                if sub_pattern.search(page):
                     end = max(start_page, i - 1)
                     return end, {
                         "marker": "独立协议",

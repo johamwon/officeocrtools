@@ -9,219 +9,236 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
-	"github.com/getlantern/systray"
-	"golang.org/x/sys/windows/registry"
-)
-
-const (
-	appName    = "DocParser"
-	appTitle   = "文档解析与合同管理系统"
-	appVersion = "0.2.0"
-	backendURL = "http://localhost:8000"
-	llmURL     = "http://localhost:8080"
+	"gopkg.in/ini.v1"
 )
 
 var (
 	baseDir    string
 	llmCmd     *exec.Cmd
 	backendCmd *exec.Cmd
-	logFile    *os.File
 )
 
 func main() {
-	// 确定基础目录
-	exePath, err := os.Executable()
-	if err != nil {
-		log.Fatal(err)
-	}
-	baseDir = filepath.Dir(exePath)
-
-	// 初始化日志
-	setupLogging()
+	baseDir = getBaseDir()
+	logFile := setupLogging()
 	defer logFile.Close()
 
-	log.Printf("%s v%s 启动中...", appTitle, appVersion)
+	log.Println("========================================")
+	log.Println("  文档解析与合同管理系统 GUI 启动")
+	log.Println("========================================")
 
-	// 启动系统托盘
-	systray.Run(onReady, onExit)
-}
+	// 加载配置
+	config := loadLaunchConfig()
 
-func setupLogging() {
-	logDir := filepath.Join(baseDir, "logs")
-	os.MkdirAll(logDir, 0755)
+	// 启动 LLM 服务
+	startLLM(config)
 
-	var err error
-	logFile, err = os.OpenFile(
-		filepath.Join(logDir, "launcher.log"),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND,
-		0644,
-	)
-	if err != nil {
-		log.Fatal(err)
+	// 启动后端
+	startBackend()
+
+	// 等待后端就绪
+	log.Println("等待后端服务就绪...")
+	if !waitForService("http://localhost:8000/api/health", 60*time.Second) {
+		log.Println("后端启动超时，仍然尝试打开窗口...")
+	} else {
+		log.Println("后端已就绪")
 	}
 
-	multiWriter := io.MultiWriter(os.Stdout, logFile)
-	log.SetOutput(multiWriter)
-	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
-}
+	// 打开浏览器
+	log.Println("打开浏览器...")
+	url := fmt.Sprintf("http://localhost:%d", config.ServerPort)
+	exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
 
-func onReady() {
-	// 设置托盘图标和标题
-	systray.SetTitle(appName)
-	systray.SetTooltip(fmt.Sprintf("%s v%s", appTitle, appVersion))
+	log.Println("系统已启动，关闭此窗口将停止所有服务")
+	log.Printf("访问地址: %s", url)
 
-	// 菜单项
-	mOpen := systray.AddMenuItem("打开浏览器", "在浏览器中打开系统")
-	mStatus := systray.AddMenuItem("● 启动中...", "服务状态")
-	mStatus.Disable()
-	systray.AddSeparator()
-	mRestart := systray.AddMenuItem("重启服务", "重启所有服务")
-	mLogs := systray.AddMenuItem("查看日志", "打开日志目录")
-	systray.AddSeparator()
-	mAutoStart := systray.AddMenuItemCheckbox("开机自启", "设置开机自动启动", isAutoStartEnabled())
-	systray.AddSeparator()
-	mQuit := systray.AddMenuItem("退出", "停止所有服务并退出")
-
-	// 启动服务
-	go startServices(mStatus)
-
-	// 监听信号
+	// 等待信号退出
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	<-sigChan
 
-	// 事件循环
-	go func() {
-		for {
-			select {
-			case <-mOpen.ClickedCh:
-				openBrowser(backendURL)
-			case <-mRestart.ClickedCh:
-				log.Println("用户请求重启服务...")
-				mStatus.SetTitle("● 重启中...")
-				stopServices()
-				time.Sleep(2 * time.Second)
-				go startServices(mStatus)
-			case <-mLogs.ClickedCh:
-				logDir := filepath.Join(baseDir, "logs")
-				exec.Command("explorer", logDir).Start()
-			case <-mAutoStart.ClickedCh:
-				if mAutoStart.Checked() {
-					mAutoStart.Uncheck()
-					setAutoStart(false)
-					log.Println("已取消开机自启")
-				} else {
-					mAutoStart.Check()
-					setAutoStart(true)
-					log.Println("已设置开机自启")
-				}
-			case <-mQuit.ClickedCh:
-				systray.Quit()
-			case <-sigChan:
-				systray.Quit()
-			}
-		}
-	}()
-}
-
-func onExit() {
-	log.Println("正在退出...")
-	stopServices()
+	// 停止所有服务
+	log.Println("收到退出信号，停止服务...")
+	stopAll()
 	log.Println("已退出")
 }
 
-func startServices(statusItem *systray.MenuItem) {
-	// 1. 启动 LLM 服务
-	llamaPath := filepath.Join(baseDir, "runtime", "llama-server.exe")
-	modelPath := filepath.Join(baseDir, "models", "llm", "qwen2.5-coder-1.5b-instruct-q8_0.gguf")
+func getBaseDir() string {
+	exePath, err := os.Executable()
+	if err != nil {
+		cwd, _ := os.Getwd()
+		return cwd
+	}
+	return filepath.Dir(exePath)
+}
 
-	if fileExists(llamaPath) && fileExists(modelPath) {
-		log.Println("启动 LLM 服务...")
-		llmCmd = startHiddenProcess(llamaPath,
-			"-m", modelPath,
-			"-c", "4096",
-			"--port", "8080",
-			"--log-disable",
-		)
+func setupLogging() *os.File {
+	logDir := filepath.Join(baseDir, "logs")
+	os.MkdirAll(logDir, 0755)
 
-		// 等待 LLM 就绪
-		if !waitForService(llmURL+"/health", 30*time.Second) {
-			log.Println("⚠ LLM 服务启动超时")
-		} else {
-			log.Println("✓ LLM 服务已就绪")
-		}
-	} else {
-		log.Println("⚠ 未找到 LLM 运行时，跳过")
+	f, err := os.OpenFile(
+		filepath.Join(logDir, "gui_launcher.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644,
+	)
+	if err != nil {
+		return os.Stdout
+	}
+	multiWriter := io.MultiWriter(os.Stdout, f)
+	log.SetOutput(multiWriter)
+	log.SetFlags(log.Ldate | log.Ltime)
+	return f
+}
+
+type LaunchConfig struct {
+	LLMCommand string
+	LLMPort    int
+	ServerPort int
+}
+
+func loadLaunchConfig() LaunchConfig {
+	config := LaunchConfig{
+		LLMPort:    8080,
+		ServerPort: 8000,
 	}
 
-	// 2. 启动后端
-	pythonPath := filepath.Join(baseDir, "runtime", "python", "python.exe")
-	if !fileExists(pythonPath) {
-		// 回退到系统Python
-		pythonPath = "python"
+	configPath := filepath.Join(baseDir, "config", "app.ini")
+	cfg, err := ini.Load(configPath)
+	if err != nil {
+		log.Printf("配置文件加载失败: %v，使用默认配置", err)
+		return config
 	}
-	appScript := filepath.Join(baseDir, "app", "run_backend.py")
 
-	log.Println("启动后端服务...")
-	backendCmd = startHiddenProcess(pythonPath, appScript)
+	if cfg.HasSection("llm") {
+		llm := cfg.Section("llm")
+		config.LLMCommand = llm.Key("launch_command").String()
+		config.LLMPort = llm.Key("port").MustInt(8080)
+	}
+	if cfg.HasSection("server") {
+		config.ServerPort = cfg.Section("server").Key("port").MustInt(8000)
+	}
 
-	// 等待后端就绪
-	if !waitForService(backendURL+"/api/health", 60*time.Second) {
-		log.Println("⚠ 后端服务启动超时")
-		statusItem.SetTitle("● 启动失败")
+	return config
+}
+
+func startLLM(config LaunchConfig) {
+	if config.LLMCommand == "" {
+		log.Println("[LLM] 未配置启动命令，跳过")
+		return
+	}
+
+	// 替换路径变量
+	modelsDir := filepath.Join(baseDir, "models", "llm")
+	cmd := config.LLMCommand
+	cmd = strings.ReplaceAll(cmd, "{models_dir}", modelsDir)
+	cmd = strings.ReplaceAll(cmd, "{base_dir}", baseDir)
+
+	// 解析命令
+	parts := splitCommand(cmd)
+	if len(parts) == 0 {
+		return
+	}
+
+	// 检查 llama-server 是否在 runtime 目录
+	exeName := parts[0]
+	runtimeExe := filepath.Join(baseDir, "runtime", exeName)
+	if _, err := os.Stat(runtimeExe); err == nil {
+		parts[0] = runtimeExe
+	} else if _, err := os.Stat(runtimeExe + ".exe"); err == nil {
+		parts[0] = runtimeExe + ".exe"
+	}
+
+	log.Printf("[LLM] 启动: %s", strings.Join(parts, " "))
+	llmCmd = exec.Command(parts[0], parts[1:]...)
+	llmCmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000,
+	}
+	llmCmd.Dir = baseDir
+
+	// 日志输出
+	logPath := filepath.Join(baseDir, "logs", "llm.log")
+	f, _ := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if f != nil {
+		llmCmd.Stdout = f
+		llmCmd.Stderr = f
+	}
+
+	if err := llmCmd.Start(); err != nil {
+		log.Printf("[LLM] 启动失败: %v", err)
+		return
+	}
+	log.Printf("[LLM] 已启动 (PID: %d)", llmCmd.Process.Pid)
+
+	// 等待 LLM 就绪
+	llmURL := fmt.Sprintf("http://localhost:%d/health", config.LLMPort)
+	if waitForService(llmURL, 30*time.Second) {
+		log.Println("[LLM] 服务已就绪")
 	} else {
-		log.Println("✓ 后端服务已就绪")
-		statusItem.SetTitle("● 运行中")
-
-		// 首次启动打开浏览器
-		openBrowser(backendURL)
+		log.Println("[LLM] 等待超时，继续启动后端...")
 	}
 }
 
-func stopServices() {
+func startBackend() {
+	// 查找 Python
+	pythonPath := filepath.Join(baseDir, "runtime", "python", "python.exe")
+	if _, err := os.Stat(pythonPath); err != nil {
+		pythonPath = "python"
+	}
+
+	appScript := filepath.Join(baseDir, "app", "run_backend.py")
+	if _, err := os.Stat(appScript); err != nil {
+		// 开发环境
+		appScript = filepath.Join(baseDir, "run_backend.py")
+	}
+
+	log.Printf("[Backend] 启动: %s %s", pythonPath, appScript)
+
+	backendCmd = exec.Command(pythonPath, appScript)
+	backendCmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000,
+	}
+	backendCmd.Dir = filepath.Dir(appScript)
+
+	// 环境变量
+	backendCmd.Env = append(os.Environ(),
+		"FLAGS_enable_pir_in_executor=0",
+		"FLAGS_use_mkldnn=0",
+		fmt.Sprintf("PADDLEX_HOME=%s", filepath.Join(baseDir, "models", "paddleocr")),
+	)
+
+	logPath := filepath.Join(baseDir, "logs", "backend.log")
+	f, _ := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if f != nil {
+		backendCmd.Stdout = f
+		backendCmd.Stderr = f
+	}
+
+	if err := backendCmd.Start(); err != nil {
+		log.Printf("[Backend] 启动失败: %v", err)
+		return
+	}
+	log.Printf("[Backend] 已启动 (PID: %d)", backendCmd.Process.Pid)
+}
+
+func stopAll() {
 	if backendCmd != nil && backendCmd.Process != nil {
 		log.Println("停止后端...")
 		backendCmd.Process.Kill()
-		backendCmd = nil
 	}
 	if llmCmd != nil && llmCmd.Process != nil {
 		log.Println("停止 LLM...")
 		llmCmd.Process.Kill()
-		llmCmd = nil
 	}
-}
-
-func startHiddenProcess(name string, args ...string) *exec.Cmd {
-	cmd := exec.Command(name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		HideWindow:    true,
-		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
-	}
-	cmd.Dir = baseDir
-
-	// 重定向输出到日志
-	logPath := filepath.Join(baseDir, "logs", filepath.Base(name)+".log")
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err == nil {
-		cmd.Stdout = f
-		cmd.Stderr = f
-	}
-
-	if err := cmd.Start(); err != nil {
-		log.Printf("启动失败 %s: %v", name, err)
-		return nil
-	}
-
-	log.Printf("已启动 %s (PID: %d)", name, cmd.Process.Pid)
-	return cmd
 }
 
 func waitForService(url string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	client := &http.Client{Timeout: 2 * time.Second}
-
 	for time.Now().Before(deadline) {
 		resp, err := client.Get(url)
 		if err == nil {
@@ -230,51 +247,32 @@ func waitForService(url string, timeout time.Duration) bool {
 				return true
 			}
 		}
-		time.Sleep(1 * time.Second)
+		time.Sleep(time.Second)
 	}
 	return false
 }
 
-func openBrowser(url string) {
-	exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
-}
+func splitCommand(cmd string) []string {
+	// 简单的命令行分割（支持引号）
+	var parts []string
+	var current strings.Builder
+	inQuote := false
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-// ========== 开机自启 ==========
-
-func isAutoStartEnabled() bool {
-	key, err := registry.OpenKey(
-		registry.CURRENT_USER,
-		`Software\Microsoft\Windows\CurrentVersion\Run`,
-		registry.QUERY_VALUE,
-	)
-	if err != nil {
-		return false
+	for _, c := range cmd {
+		switch {
+		case c == '"':
+			inQuote = !inQuote
+		case c == ' ' && !inQuote:
+			if current.Len() > 0 {
+				parts = append(parts, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteRune(c)
+		}
 	}
-	defer key.Close()
-
-	_, _, err = key.GetStringValue(appName)
-	return err == nil
-}
-
-func setAutoStart(enable bool) error {
-	key, err := registry.OpenKey(
-		registry.CURRENT_USER,
-		`Software\Microsoft\Windows\CurrentVersion\Run`,
-		registry.ALL_ACCESS,
-	)
-	if err != nil {
-		return err
+	if current.Len() > 0 {
+		parts = append(parts, current.String())
 	}
-	defer key.Close()
-
-	if enable {
-		exePath, _ := os.Executable()
-		return key.SetStringValue(appName, exePath)
-	}
-	return key.DeleteValue(appName)
+	return parts
 }

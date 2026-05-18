@@ -18,6 +18,7 @@ venv/
 # IDE
 .vscode/
 .idea/
+.claude/
 
 # 上传文件
 uploads/
@@ -29,3 +30,21 @@ Thumbs.db
 # 测试产物
 *.png
 !frontend/*.png
+test_*.py
+
+# 日志
+logs/
+
+# 二进制文件（打包素材，太大不入库）
+scripts/*.exe
+scripts/*.dll
+scripts/*.gguf
+scripts/*.zip
+scripts/err.txt
+scripts/out.txt
+
+# PDF测试文件
+*.pdf
+
+# Go编译产物
+*.exe

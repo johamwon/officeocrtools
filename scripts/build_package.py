@@ -107,7 +107,12 @@ def setup_llm_runtime():
 
     if LLAMA_SERVER_EXE.exists():
         shutil.copy2(LLAMA_SERVER_EXE, runtime_dir / "llama-server.exe")
-        print("  ✓ llama-server.exe 已复制")
+        print("  ✓ llama-server.exe")
+
+        # 复制所有关联的DLL
+        for dll in SCRIPT_DIR.glob("*.dll"):
+            shutil.copy2(dll, runtime_dir / dll.name)
+            print(f"  ✓ {dll.name}")
     else:
         print(f"  ⚠ 未找到 {LLAMA_SERVER_EXE}")
         print(f"  请从 https://github.com/ggerganov/llama.cpp/releases 下载 Windows 版本")

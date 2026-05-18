@@ -73,9 +73,10 @@ BUILTIN_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "total_amount": "合同金额",
             "service_content": "服务内容/标的物",
             "performance_period": "履行期限(起止日期)",
-            "payment_terms": "付款方式和条件",
+            "payment_terms": "付款方式和条件(原文)",
+            "payment_schedule": "付款计划(结构化时间节点)",
         },
-        "key_fields": ["contract_name", "party_a", "party_b", "total_amount", "service_content", "performance_period", "payment_terms"],
+        "key_fields": ["contract_name", "party_a", "party_b", "total_amount", "service_content", "performance_period", "payment_schedule"],
     },
 }
 

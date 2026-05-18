@@ -1,16 +1,19 @@
 """
 启动后端服务
-使用方式: python run_backend.py
 """
 import os
 import sys
 import configparser
 from pathlib import Path
 
+# 禁用 PaddlePaddle PIR 执行器（兼容性）
+os.environ.setdefault("FLAGS_enable_pir_in_executor", "0")
+os.environ.setdefault("FLAGS_use_mkldnn", "0")
+
 # 确定基础目录
 BASE_DIR = Path(__file__).resolve().parent
 
-# 加载配置文件（优先级：config/app.ini > .env > 环境变量）
+
 def load_config():
     """从 config/app.ini 加载配置到环境变量"""
     config_file = BASE_DIR / "config" / "app.ini"
@@ -40,7 +43,8 @@ def load_config():
     if config.has_section("llm"):
         os.environ.setdefault("LLM_BASE_URL", config.get("llm", "base_url", fallback="http://localhost:8080/v1"))
         os.environ.setdefault("LLM_API_KEY", config.get("llm", "api_key", fallback="not-needed"))
-        os.environ.setdefault("LLM_MODEL", config.get("llm", "model", fallback="qwen2.5-coder-1.5b-instruct"))
+        os.environ.setdefault("LLM_MODEL", config.get("llm", "model", fallback=""))
+        os.environ.setdefault("LLM_CONTEXT_SIZE", config.get("llm", "context_size", fallback="4096"))
 
     # [notify]
     if config.has_section("notify"):

@@ -105,39 +105,55 @@ class LLMExtractor:
 
     def _build_prompt(self, text: str, doc_type: str, fields: List[str]) -> str:
         """
-        构建极简prompt（针对1.5B代码模型优化）
+        构建提取prompt
 
-        策略：
-        - 不用system message（节省token）
-        - 字段名极简化
-        - 用代码风格引导JSON输出
+        针对不同模型能力设计两种风格：
+        - 代码模型（qwen-coder等）：极简指令
+        - 通用模型（MiniCPM-V等）：给出JSON模板让模型填空
         """
-        # 极简字段描述：只用 key(中文名) 格式
         field_desc = self._schema_manager.build_field_prompt(doc_type, fields)
 
-        # 截断文本确保不超过token预算（约1500 tokens ≈ 1200中文字符）
-        max_text_len = 1200
+        # 根据配置的context_size动态计算最大文本长度
+        from .config import LLM_CONFIG
+        context_size = LLM_CONFIG.get("context_size", 4096)
+        max_text_len = min(int(context_size * 0.3), 2400)
+
         if len(text) > max_text_len:
             text = text[:max_text_len]
 
-        prompt = f"""Extract fields from text, output JSON only.
-Fields: {field_desc}
+        # 构建JSON模板（让模型填空，提高格式遵循率）
+        json_template = "{\n"
+        for i, field in enumerate(fields):
+            json_template += f'  "{field}": "..."'
+            if i < len(fields) - 1:
+                json_template += ","
+            json_template += "\n"
+        json_template += "}"
 
-Text:
+        prompt = f"""请从以下文本中提取信息，严格按照JSON格式输出，不要输出其他内容。
+需要提取的字段: {field_desc}
+
+文本内容:
 {text}
 
-JSON:"""
+请按以下格式输出（将...替换为提取到的值，如果找不到则填null）:
+{json_template}"""
         return prompt
 
     def _parse_output(self, raw: str, fields: List[str]) -> Dict[str, Any]:
         """
-        解析模型输出，带容错处理
+        解析模型输出，带多级容错处理
 
         尝试顺序：
         1. 直接JSON解析
         2. 提取JSON代码块
-        3. 正则匹配key-value
+        3. 提取第一个{...}
+        4. 宽松JSON提取（处理中文引号等）
+        5. 正则匹配key-value（中英文冒号）
         """
+        if not raw or not raw.strip():
+            return {field: None for field in fields}
+
         # 尝试1：直接解析
         result = self._try_parse_json(raw)
         if result:
@@ -150,15 +166,29 @@ JSON:"""
             if result:
                 return {k: v for k, v in result.items() if k in fields}
 
-        # 尝试3：提取第一个{...}
-        brace_match = re.search(r"\{[^{}]*\}", raw, re.DOTALL)
-        if brace_match:
-            result = self._try_parse_json(brace_match.group(0))
+        # 尝试3：提取第一个{...}（支持嵌套）
+        brace_start = raw.find("{")
+        brace_end = raw.rfind("}")
+        if brace_start != -1 and brace_end > brace_start:
+            json_str = raw[brace_start:brace_end + 1]
+            result = self._try_parse_json(json_str)
             if result:
                 return {k: v for k, v in result.items() if k in fields}
 
-        # 尝试4：正则逐字段匹配
-        logger.warning("JSON解析失败，尝试正则匹配")
+        # 尝试4：修复常见的非标准JSON（中文引号、缺少引号等）
+        fixed = raw
+        fixed = fixed.replace("\u201c", '"').replace("\u201d", '"')  # 中文双引号
+        fixed = fixed.replace("\u2018", "'").replace("\u2019", "'")  # 中文单引号
+        fixed = fixed.replace("：", ":").replace("，", ",")  # 中文标点
+        brace_start = fixed.find("{")
+        brace_end = fixed.rfind("}")
+        if brace_start != -1 and brace_end > brace_start:
+            result = self._try_parse_json(fixed[brace_start:brace_end + 1])
+            if result:
+                return {k: v for k, v in result.items() if k in fields}
+
+        # 尝试5：正则逐字段匹配（支持中英文格式）
+        logger.warning(f"JSON解析失败，尝试正则匹配。模型原始输出: {raw[:200]}")
         return self._regex_fallback(raw, fields)
 
     def _try_parse_json(self, text: str) -> Optional[Dict[str, Any]]:
@@ -172,19 +202,50 @@ JSON:"""
             return None
 
     def _regex_fallback(self, text: str, fields: List[str]) -> Dict[str, Any]:
-        """正则兜底提取"""
+        """正则兜底提取（支持多种格式）"""
         result = {}
         for field in fields:
-            # 匹配 "field": "value" 或 "field": value
+            value = None
+
+            # 模式1: "field": "value"
             pattern = rf'"{field}"\s*:\s*"([^"]*)"'
             match = re.search(pattern, text)
             if match:
-                result[field] = match.group(1)
-            else:
-                # 尝试匹配数字值
+                value = match.group(1)
+
+            # 模式2: "field": value（无引号值）
+            if not value:
+                pattern = rf'"{field}"\s*:\s*([^\s,}}"]+)'
+                match = re.search(pattern, text)
+                if match:
+                    val = match.group(1).strip().strip('"').strip("'")
+                    if val and val.lower() != "null":
+                        value = val
+
+            # 模式3: field: "value"（无引号key）
+            if not value:
+                pattern = rf'{field}\s*[:：]\s*["\']([^"\']+)["\']'
+                match = re.search(pattern, text)
+                if match:
+                    value = match.group(1)
+
+            # 模式4: field: value（完全无引号，中文冒号）
+            if not value:
+                pattern = rf'{field}\s*[:：]\s*(.+?)(?:\n|,|}}|$)'
+                match = re.search(pattern, text)
+                if match:
+                    val = match.group(1).strip().strip('"').strip("'").strip(",")
+                    if val and val.lower() not in ("null", "none", "...", ""):
+                        value = val
+
+            # 模式5: 数字值
+            if not value:
                 pattern = rf'"{field}"\s*:\s*([\d.]+)'
                 match = re.search(pattern, text)
-                result[field] = match.group(1) if match else None
+                if match:
+                    value = match.group(1)
+
+            result[field] = value
 
         return result
 

@@ -18,9 +18,7 @@ from .config import (
 )
 from .database import get_db, init_db
 
-from notifier.config import DINGTALK_WEBHOOK_URL, DINGTALK_SECRET, NOTIFY_ENABLED, NOTIFY_CHECK_HOUR, NOTIFY_CHECK_MINUTE
 from notifier.time_extractor import ScheduleExtractor
-from notifier.scheduler import NotificationScheduler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,29 +62,10 @@ def on_startup():
     tasks.get_parser()
     logger.info("OCR 模型加载完成")
 
-    # 启动推送调度器
-    if NOTIFY_ENABLED and DINGTALK_WEBHOOK_URL:
-        global _notification_scheduler
-        _notification_scheduler = NotificationScheduler(
-            webhook_url=DINGTALK_WEBHOOK_URL,
-            secret=DINGTALK_SECRET or None,
-            check_hour=NOTIFY_CHECK_HOUR,
-            check_minute=NOTIFY_CHECK_MINUTE,
-        )
-        _notification_scheduler.start()
-        logger.info("钉钉推送调度器已启动")
-    else:
-        logger.info("推送调度器未启用（设置 NOTIFY_ENABLED=true 和 DINGTALK_WEBHOOK_URL 启用）")
-
-
-_notification_scheduler = None
-
 
 @app.on_event("shutdown")
 def on_shutdown():
     tasks.shutdown()
-    if _notification_scheduler:
-        _notification_scheduler.stop()
 
 
 # ========== 根路径 ==========
@@ -340,15 +319,6 @@ def list_doc_types():
     """列出支持的文档类型"""
     parser = tasks.get_parser()
     return {"doc_types": parser.list_doc_types()}
-
-
-@app.post("/api/notify/check", response_model=schemas.StatusResponse)
-def trigger_notification_check():
-    """手动触发一次推送检查（调试用）"""
-    if not _notification_scheduler:
-        raise HTTPException(status_code=400, detail="推送调度器未启用")
-    _notification_scheduler.run_check_now()
-    return schemas.StatusResponse(success=True, message="推送检查已执行")
 
 
 if __name__ == "__main__":

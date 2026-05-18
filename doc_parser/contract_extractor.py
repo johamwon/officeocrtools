@@ -16,6 +16,7 @@ from .regex_extractor import ContractRegexExtractor, FieldValidator
 from .llm_extractor import LLMExtractor
 from .text_processor import TextProcessor
 from .schema_manager import SchemaManager
+from .payment_parser import PaymentParser
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +46,9 @@ FIELD_KEYWORDS = {
             "付款方式", "付款条件", "支付方式", "支付条件",
             "账期", "预付", "尾款", "分期", "到账",
         ],
-        "expand_before": 2,  # 向上扩展段落数
-        "expand_after": 4,   # 向下扩展段落数（付款条件通常在关键字后面展开）
-        "prompt": "Extract payment terms and conditions from text, output JSON.\nField: payment_terms(付款方式和条件，包括付款比例、时间节点、付款条件)",
+        "expand_before": 2,
+        "expand_after": 4,
+        "prompt": "请从以下文本中提取付款方式和条件（包括付款比例、时间节点、付款条件），严格按JSON格式输出，不要输出其他内容:\n输出格式: {\"payment_terms\": \"...\"}",
     },
     "performance_period": {
         "keywords": [
@@ -59,7 +60,7 @@ FIELD_KEYWORDS = {
         ],
         "expand_before": 1,
         "expand_after": 3,
-        "prompt": "Extract performance period/delivery time from text, output JSON.\nField: performance_period(履行期限/交付周期，如有具体日期写起止日期，如为天数写具体描述)",
+        "prompt": "请从以下文本中提取履行期限或交付周期（如有具体日期写起止日期，如为天数写具体描述），严格按JSON格式输出，不要输出其他内容:\n输出格式: {\"performance_period\": \"...\"}",
     },
     "service_content": {
         "keywords": [
@@ -69,8 +70,8 @@ FIELD_KEYWORDS = {
             "项目名称", "采购服务名称", "技术内容",
         ],
         "expand_before": 1,
-        "expand_after": 5,  # 服务内容通常较长
-        "prompt": "Extract service content/subject from text, output JSON.\nField: service_content(服务内容或项目标的物，简要概括主要工作)",
+        "expand_after": 5,
+        "prompt": "请从以下文本中提取服务内容或项目标的物（简要概括主要工作），严格按JSON格式输出，不要输出其他内容:\n输出格式: {\"service_content\": \"...\"}",
     },
 }
 
@@ -93,6 +94,7 @@ class ContractExtractor:
         self._schema = schema_manager
         self._validator = FieldValidator()
         self._text_processor = TextProcessor()
+        self._payment_parser = PaymentParser()
 
     def extract(
         self,
@@ -149,6 +151,18 @@ class ContractExtractor:
         # 4. 交叉校验
         logger.info("交叉校验...")
         final_results = self._cross_validate(regex_results, llm_results, all_fields)
+
+        # 5. 付款条件结构化解析
+        if "payment_schedule" in all_fields or "payment_terms" in all_fields:
+            payment_schedule = self._parse_payment_schedule(ocr_text, final_results)
+            if payment_schedule:
+                final_results["payment_schedule"] = {
+                    "value": payment_schedule,
+                    "confidence": 0.8,
+                    "source": "structured_parser",
+                    "regex_value": None,
+                    "llm_value": None,
+                }
 
         return final_results
 
@@ -417,6 +431,46 @@ JSON:"""
                 return cleaned
 
         return None
+
+    def _parse_payment_schedule(
+        self, full_text: str, current_results: Dict[str, Any]
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        结构化解析付款条件
+
+        优先用正则从原文解析，如果解析不出来则用 payment_terms 字段的值
+        """
+        # 获取合同总金额（用于计算百分比对应金额）
+        total_amount = None
+        amount_data = current_results.get("total_amount", {})
+        if isinstance(amount_data, dict) and amount_data.get("value"):
+            try:
+                val = str(amount_data["value"]).replace(",", "")
+                total_amount = float(re.search(r"[\d.]+", val).group())
+            except (ValueError, AttributeError):
+                pass
+
+        # 定位付款相关段落
+        paragraphs = self._split_paragraphs(full_text)
+        payment_keywords = [
+            "付款", "支付", "结算", "款项",
+            "付款方式", "支付方式", "合同价款",
+        ]
+        hit_indices = self._find_keyword_hits(paragraphs, payment_keywords)
+
+        if hit_indices:
+            payment_text = self._expand_context(paragraphs, hit_indices, 1, 6)
+        else:
+            # 回退到 payment_terms 字段
+            pt_data = current_results.get("payment_terms", {})
+            payment_text = pt_data.get("value", "") if isinstance(pt_data, dict) else ""
+
+        if not payment_text:
+            return None
+
+        # 调用结构化解析器
+        schedule = self._payment_parser.parse(payment_text, total_amount)
+        return schedule if schedule else None
 
     def _llm_extract_from_chunks(
         self, chunks: List[str], fields: List[str]
